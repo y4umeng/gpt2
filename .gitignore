@@ -2,11 +2,14 @@
 venv/
 env/
 .env
+.venv/
+data/
 
 # RunPod & GPU Caches
 .triton_cache/
 .cache/
 .ipynb_checkpoints/
+torchinductor_root/
 
 # Python artifacts
 __pycache__/
