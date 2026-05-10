@@ -1,0 +1,19 @@
+# Environments
+venv/
+env/
+.env
+
+# RunPod & GPU Caches
+.triton_cache/
+.cache/
+.ipynb_checkpoints/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.class
+
+# Large files (optional - uncomment if needed)
+# *.pt
+# *.safetensors
+# *.bin
