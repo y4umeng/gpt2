@@ -8,39 +8,7 @@ import sys
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 from torch.utils.data.distributed import DistributedSampler
-
-class ShakespeareDataset(Dataset):
-    def __init__(self, split: str, block_size: int):
-        super().__init__()
-        self.block_size = block_size
-        self.split = split
-        filename = 'train.bin' if split == 'train' else 'val.bin'
-        self.filepath = os.path.join(os.path.dirname(__file__), "data/shakespeare/", filename)
-        
-        # 1. Calculate length using file size on disk, NOT by loading the data.
-        # np.uint16 takes up 2 bytes per token.
-        file_size_bytes = os.path.getsize(self.filepath)
-        total_tokens = file_size_bytes // 2
-        
-        self.length = total_tokens - self.block_size
-        
-        # 2. Set data to None initially (Lazy Initialization)
-        self.data = None
-
-    def __len__(self):
-        return self.length
-    
-    def __getitem__(self, idx):
-        if self.data is None:
-            self.data = np.memmap(self.filepath, dtype=np.uint16, mode='r')
-            
-        chunk = self.data[idx : idx + self.block_size + 1]
-    
-        # Convert to torch tensor
-        x = torch.from_numpy(chunk[:-1].astype(np.int64))
-        y = torch.from_numpy(chunk[1:].astype(np.int64))
-
-        return x, y
+from datasets import PretokenizedDataset
 
 def train():
     config = GPTConfig(vocab_size=50304)
@@ -51,6 +19,8 @@ def train():
     device = 'cuda'
     num_workers = 4
     log_interval = 1
+    dataset_dir = '/workspace/gpt2/data/openwebtext'
+    # dataset_dir = '/workspace/gpt2/data/shakespeare'
 
     ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
     if ddp:
@@ -74,9 +44,9 @@ def train():
         print("Training on 1 device")
 
     torch.manual_seed(1337 + seed_offset)
-    
-    train_ds = ShakespeareDataset('train', config.block_size)
-    val_ds = ShakespeareDataset('val', config.block_size)
+
+    train_ds = PretokenizedDataset(dataset_dir, 'train', config.block_size)
+    val_ds = PretokenizedDataset(dataset_dir, 'val', config.block_size)
     train_sampler = DistributedSampler(train_ds) if ddp else None
     val_sampler = DistributedSampler(val_ds, shuffle=False) if ddp else None
     train_dl = DataLoader(
@@ -128,10 +98,15 @@ def train():
             # in DDP training we only need to sync gradients at the last micro step.
             model.require_backward_grad_sync = last_micro_step_of_batch
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-        with torch.autocast(device_type=device, dtype=torch.bfloat16):
-            _, loss = model(x, y)
-        loss = loss / grad_accum_steps
-        loss.backward()
+        if ddp and not last_micro_step_of_batch:
+            with model.no_sync():
+                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    _, loss = model(x, y)
+                (loss / grad_accum_steps).backward()
+        else:
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                _, loss = model(x, y)
+            (loss / grad_accum_steps).backward()
         if last_micro_step_of_batch:
             batch_num = (i + 1)//grad_accum_steps - 1
             norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -141,11 +116,11 @@ def train():
 
             if batch_num % log_interval == 0 and master_process:
                 t2 = time.time()
-                t1 = t2
                 dt = (t2 - t1)*1000
                 dt /= log_interval
+                t1 = t2
                 # loss is an estimate over total batch given single micro batch
-                print(f"step {batch_num} | loss: {loss.item() * grad_accum_steps:.6f} | grad norm: {norm:.4f} | time {dt:.2f}ms | tok/sec: {(tokens_per_iter) / (dt/1000):.2f}")
+                print(f"step {batch_num} | loss: {loss.item():.6f} | grad norm: {norm:.4f} | time {dt:.2f}ms | tok/sec: {(tokens_per_iter) / (dt/1000):.2f}")
             if batch_num == 20:
                 break
 
